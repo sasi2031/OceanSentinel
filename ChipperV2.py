@@ -1,13 +1,12 @@
 import sys
 import os
-# os.environ['CUDA_VISIBLE_DEVICES'] = ''  # Force CPU
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="torch")
 import os
 import shutil
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, 
                              QWidget, QLabel, QLineEdit, QPushButton, QComboBox, 
-                             QDoubleSpinBox, QSpinBox, QFileDialog, QMessageBox)
+                             QSpinBox, QFileDialog, QMessageBox)
 from PyQt6.QtCore import Qt
 import numpy as np
 import matplotlib.pyplot as plt
@@ -18,24 +17,19 @@ import geopandas as gpd
 from shapely.geometry import Polygon
 import cv2
 
-def get_starts(img_size, chip_size, step):
+def get_starts(img_size, chip_size):
     if img_size <= 0:
         return []
-    starts = list(range(0, img_size - chip_size + 1, step))
+    starts = list(range(0, img_size - chip_size + 1, chip_size))
     if starts and starts[-1] + chip_size < img_size:
-        next_start = starts[-1] + step
-        starts.append(next_start)
+        starts.append(starts[-1] + chip_size)
     elif not starts:
         starts = [0]
     return starts
 
-def extract_image_chips(image_path, output_folder, chip_height=256, chip_width=256, 
-                        overlap_pct=0.25, output_format='png'):
+def extract_image_chips(image_path, output_folder, chip_height=256, chip_width=256, output_format='png'):
     if output_format not in ['png', 'jpg']:
         raise ValueError("output_format must be 'png' or 'jpg'.")
-    
-    if not (0.0 <= overlap_pct < 1.0):
-        raise ValueError("overlap_pct must be between 0.0 and less than 1.0.")
     
     with rasterio.open(image_path) as src:
         img_data = src.read()
@@ -54,29 +48,24 @@ def extract_image_chips(image_path, output_folder, chip_height=256, chip_width=2
         
         img = np.transpose(img, (1, 2, 0)).astype(np.float32)
         
-        # Convert to 8-bit: linear stretch to [0,255] uint8 per band (handles 8/16-bit+ input)
+        # Convert to 8-bit: linear stretch to [0,255] uint8 per band
         for band in range(img.shape[2]):
             band_data = img[:, :, band]
-            if band_data.max() > band_data.min():  # Avoid div0
+            if band_data.max() > band_data.min():
                 band_data = (band_data - band_data.min()) / (band_data.max() - band_data.min()) * 255.0
             else:
-                band_data = np.zeros_like(band_data)  # Flat band
+                band_data = np.zeros_like(band_data)
             img[:, :, band] = np.clip(band_data, 0, 255).astype(np.uint8)
         
-        img = img.astype(np.uint8)  # Ensure final dtype
+        img = img.astype(np.uint8)
     
     os.makedirs(output_folder, exist_ok=True)
     
-    overlap_px_h = int(overlap_pct * chip_height)
-    overlap_px_w = int(overlap_pct * chip_width)
-    step_h = chip_height - overlap_px_h
-    step_w = chip_width - overlap_px_w
+    step_h = chip_height
+    step_w = chip_width
     
-    if step_h <= 0 or step_w <= 0:
-        raise ValueError("Overlap percentage too high: step size must be positive.")
-    
-    height_starts = get_starts(img_height, chip_height, step_h)
-    width_starts = get_starts(img_width, chip_width, step_w)
+    height_starts = get_starts(img_height, chip_height)
+    width_starts = get_starts(img_width, chip_width)
     
     if not height_starts or not width_starts:
         raise ValueError("No chips can be extracted: image too small for chip size.")
@@ -103,7 +92,7 @@ def extract_image_chips(image_path, output_folder, chip_height=256, chip_width=2
     print(f"Extracted {chip_id} chips to {output_folder}")
     if chip_id == 0:
         raise ValueError("No chips were extracted.")
-    return output_folder, height_starts, width_starts  # Return starts for post-process
+    return output_folder, height_starts, width_starts
 
 def run_yolo_inference(model_path, source_folder, project_path, experiment_name, imgsz=1024, conf=0.1, return_results=False):
     if not os.path.exists(source_folder) or not os.listdir(source_folder):
@@ -115,6 +104,7 @@ def run_yolo_inference(model_path, source_folder, project_path, experiment_name,
         conf=conf, 
         project=project_path, 
         name=experiment_name, 
+        batch=4,
         save=True, 
         show_labels=False
     )
@@ -122,20 +112,16 @@ def run_yolo_inference(model_path, source_folder, project_path, experiment_name,
         return list(results)
     print(f"YOLO inference completed. Results saved to {os.path.join(project_path, experiment_name)}")
 
-def post_process(image_path, results_list, project_path, experiment_name, chip_height, overlap_pct, height_starts, width_starts):
-    """
-    Stitches detections back to full image (saves annotated JPG) and exports shapefile.
-    Handles CRS from input TIFF exactly for perfect overlay in QGIS.
-    """
+def post_process(image_path, results_list, project_path, experiment_name, chip_height, height_starts, width_starts):
     with rasterio.open(image_path) as src:
         transform = src.transform
         crs = src.crs
         img_height, img_width = src.height, src.width
         
         if crs is None:
-            print("Warning: Input TIFF has no CRS. Shapefile will use pixel coordinates (overlays in pixel space in QGIS).")
+            print("Warning: Input TIFF has no CRS. Shapefile will use pixel coordinates.")
         
-        # Reload full_img as 8-bit for viz (same stretch as chips)
+        # Reload full_img as 8-bit for visualization
         img_data = src.read()
         num_bands = len(img_data)
         if num_bands >= 3:
@@ -151,7 +137,6 @@ def post_process(image_path, results_list, project_path, experiment_name, chip_h
             full_img[:, :, band] = np.clip(band_data, 0, 255).astype(np.uint8)
         full_img = full_img.astype(np.uint8)
         
-        # For shapefile
         detections = []
     
     num_cols = len(width_starts)
@@ -173,23 +158,18 @@ def post_process(image_path, results_list, project_path, experiment_name, chip_h
         start_h = height_starts[row]
         start_w = width_starts[col]
         
-        # Draw on full_img (BGR for cv2)
         viz_img = cv2.cvtColor(full_img, cv2.COLOR_RGB2BGR)
         
         for i in range(len(r.obb)):
-            # Get pixel box on chip: xyxyxyxy shape (4,2)
-            box = r.obb.xyxyxyxy[i].cpu().numpy()  # (4,2)
-            # Flatten to [x1,y1,x2,y2,x3,y3,x4,y4]
-            global_box = (box + np.array([start_w, start_h])).flatten()  # Add offsets
-            # Draw poly (thickness 2, green)
-            pts = box.reshape(-1, 1, 2).astype(np.int32) + np.array([start_w, start_h])  # Offset pts directly
+            box = r.obb.xyxyxyxy[i].cpu().numpy()
+            global_box = (box + np.array([start_w, start_h])).flatten()
+            pts = box.reshape(-1, 1, 2).astype(np.int32) + np.array([start_w, start_h])
             cv2.polylines(viz_img, [pts], True, (0, 255, 0), 2)
             
-            # For shapefile: convert to geo points using exact transform
             points = []
             for j in range(4):
-                col_ = box[j, 0] + start_w  # x
-                row_ = box[j, 1] + start_h  # y
+                col_ = box[j, 0] + start_w
+                row_ = box[j, 1] + start_h
                 geo_x, geo_y = rasterio.transform.xy(transform, row_, col_)
                 points.append((geo_x, geo_y))
             poly = Polygon(points)
@@ -199,12 +179,10 @@ def post_process(image_path, results_list, project_path, experiment_name, chip_h
                 'geometry': poly
             })
     
-    # Save annotated image
     annotated_path = os.path.join(project_path, f"{experiment_name}_annotated.jpg")
     cv2.imwrite(annotated_path, viz_img)
     print(f"Annotated image saved to {annotated_path}")
     
-    # Use the input image's base name for the shapefile
     image_basename = os.path.splitext(os.path.basename(image_path))[0]
     shp_path = os.path.join(project_path, f"{image_basename}.shp")
     if detections:
@@ -214,13 +192,13 @@ def post_process(image_path, results_list, project_path, experiment_name, chip_h
     else:
         print("No detections found.")
     
-    return os.path.join(project_path, "chips", experiment_name), os.path.join(project_path, experiment_name), annotated_path  # Return folders and annotated image to delete
+    return os.path.join(project_path, "chips", experiment_name), os.path.join(project_path, experiment_name), annotated_path
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Ship Detection Inferencer")
-        self.setGeometry(100, 100, 600, 500)
+        self.setGeometry(100, 100, 600, 400)
         
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -264,14 +242,6 @@ class MainWindow(QMainWindow):
         self.chip_size_spin.setValue(1024)
         layout.addWidget(self.chip_size_spin)
         
-        # Overlap Percentage
-        layout.addWidget(QLabel("Overlap Percentage (0.0-0.99):"))
-        self.overlap_spin = QDoubleSpinBox()
-        self.overlap_spin.setRange(0.0, 0.99)
-        self.overlap_spin.setSingleStep(0.05)
-        self.overlap_spin.setValue(0.25)
-        layout.addWidget(self.overlap_spin)
-        
         # Run Button
         self.run_btn = QPushButton("Run the Model")
         self.run_btn.clicked.connect(self.run_model)
@@ -296,7 +266,6 @@ class MainWindow(QMainWindow):
         experiment_name = self.experiment_name_edit.text().strip()
         model_type = self.model_combo.currentText()
         chip_size = self.chip_size_spin.value()
-        overlap_pct = self.overlap_spin.value()
         
         if not all([image_path, project_path, experiment_name]):
             QMessageBox.warning(self, "Input Error", "Please fill all required fields.")
@@ -306,7 +275,6 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Input Error", "Invalid image path: Must be a TIFF file.")
             return
         
-        # Models folder relative to script location
         script_dir = os.path.dirname(os.path.abspath(__file__))
         models_folder = os.path.join(script_dir, "models")
         
@@ -324,10 +292,8 @@ class MainWindow(QMainWindow):
             self.run_btn.setEnabled(False)
             QApplication.processEvents()
             
-            # Ensure chips parent dir
             chips_dir = os.path.join(project_path, "chips")
             os.makedirs(chips_dir, exist_ok=True)
-            # Chips folder
             chips_subdir = os.path.join(chips_dir, experiment_name)
             
             chips_folder, height_starts, width_starts = extract_image_chips(
@@ -335,7 +301,6 @@ class MainWindow(QMainWindow):
                 output_folder=chips_subdir,
                 chip_height=chip_size,
                 chip_width=chip_size,
-                overlap_pct=overlap_pct,
                 output_format='jpg'
             )
             
@@ -355,14 +320,12 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Stitching and exporting shapefile...")
             QApplication.processEvents()
             
-            # Get folders and annotated image to delete
             chips_folder, results_folder, annotated_path = post_process(
                 image_path=image_path,
                 results_list=results_list,
                 project_path=project_path,
                 experiment_name=experiment_name,
                 chip_height=chip_size,
-                overlap_pct=overlap_pct,
                 height_starts=height_starts,
                 width_starts=width_starts
             )
@@ -370,7 +333,6 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Cleaning up temporary files...")
             QApplication.processEvents()
             
-            # Delete chips and results folders
             for folder in [chips_folder, results_folder]:
                 if os.path.exists(folder):
                     try:
@@ -379,7 +341,6 @@ class MainWindow(QMainWindow):
                     except Exception as e:
                         print(f"Failed to delete {folder}: {str(e)}")
             
-            # Delete annotated image
             if os.path.exists(annotated_path):
                 try:
                     os.remove(annotated_path)
@@ -387,7 +348,6 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     print(f"Failed to delete {annotated_path}: {str(e)}")
             
-            # Check if chips parent directory is empty and delete if it is
             if os.path.exists(chips_dir) and not os.listdir(chips_dir):
                 try:
                     shutil.rmtree(chips_dir)
