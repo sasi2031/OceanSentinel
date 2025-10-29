@@ -21,7 +21,7 @@ OceanSentinel is designed to bridge the gap between deep learning models and geo
 
 ## 📥 Getting Started
 
-There are two ways to use ChipperV2. We strongly recommend the Windows Executable for simplicity.
+There are two ways to use OceanSentinel. We strongly recommend the Windows Executable for simplicity.
 
 ### 🚀 Option 1: Windows Standalone Executable (Recommended)
 
